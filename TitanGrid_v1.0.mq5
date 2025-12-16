@@ -1,16 +1,14 @@
 //+------------------------------------------------------------------+
 //|                                           TitanGrid_v1.0.mq5     |
-//|                                     Titan Grid EA v1.17          |
-//|               Main EA: Final Integration (Clean & Robust)        |
+//|                                          Titan Grid EA v2.0      |
+//|                        Integrasi: Martingale V2 + GridSlicer + Hedge |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, ichzanaryo"
 #property link      "https://t.me/fatichid"
-#property version   "1.17"
-#property description "Titan Grid EA - Multi-Strategy Grid System"
-#property description "✅ Martingale V2 (Avg Trailing)"
-#property description "✅ GridSlicer V2 (Multi-PO Recovery)"
-#property description "✅ Entry: ZigZag OCO / Fixed Distance"
-#property description "✅ Close Manager (Global Basket Trailing)"
+#property version   "2.00"
+#property description "Titan Grid EA - Ultimate Grid System"
+#property description "✅ Martingale V2 | GridSlicer V2 | Smart Hedge"
+#property description "✅ Phoenix Exit Strategy (Basket & Avg Trail)"
 
 //+------------------------------------------------------------------+
 //| 1. CORE INCLUDES                                                 |
@@ -22,16 +20,13 @@
 #include "Core/TG_Logger.mqh"
 
 //+------------------------------------------------------------------+
-//| 2. INPUT PARAMETERS (TERPUSAT)                                   |
+//| 2. INPUT PARAMETERS                                              |
 //+------------------------------------------------------------------+
-#include "Config/TG_Inputs_Main.mqh"        // Input Utama (Entry, TP, Lot, ZigZag)
-#include "Config/TG_Inputs_Martingale.mqh"  // Input Grid (Jarak, Multiplier)
-#include "Config/TG_Inputs_GridSlicer.mqh"  // Input Recovery
-
-// Input Lama (NON-AKTIFKAN/HAPUS agar tidak bentrok)
-// #include "Config/TG_Inputs_ControlPanel.mqh" 
-// #include "Config/TG_Inputs_PendingFilter.mqh" 
-// #include "Config/TG_Inputs_Signals.mqh"       
+#include "Config/TG_Inputs_Main.mqh"
+#include "Config/TG_Inputs_Martingale.mqh"
+#include "Config/TG_Inputs_Hedge.mqh"        // [BARU] Input Hedge
+#include "Config/TG_Inputs_GridSlicer.mqh"
+#include "Config/TG_Inputs_ControlPanel.mqh" // UI Inputs (Hidden/Grouped)
 
 //+------------------------------------------------------------------+
 //| 3. SYSTEM INCLUDES                                               |
@@ -40,139 +35,169 @@
 #include "Utilities/TG_PositionScanner.mqh"
 #include "Utilities/TG_LotCalculation.mqh"
 #include "Utilities/TG_PriceHelpers.mqh"
+
+// Strategy Modules
 #include "Systems/TG_Martingale_v2.mqh"
-#include "Systems/TG_SignalSystem.mqh"        // Objek Sinyal (Placeholder)
 #include "Systems/TG_EntryManager.mqh"
 #include "Systems/TG_GridSlicer.mqh"
-#include "Systems/TG_CloseManager.mqh" 
+#include "Systems/TG_Hedge.mqh"              // [BARU] System Hedge
+#include "Systems/TG_CloseManager.mqh"
+
+// UI Modules
+#include "Interface/TG_ControlPanel_v2.mqh"
 
 //+------------------------------------------------------------------+
 //| 4. GLOBAL OBJECTS                                                |
 //+------------------------------------------------------------------+
+// Core Objects
 CMagicNumberManager  g_magic_manager;
 CStateManager        g_state_manager;
 CErrorHandler        g_error_handler;
 CLogger              g_logger;
-
 CTrade               g_trade;
+
+// Utilities
 CPositionScanner     g_position_scanner;
 CLotCalculator       g_lot_calculator;
 CPriceHelper         g_price_helper;
 
+// Systems
 CMartingaleManagerV2 g_martingale;
-CSignalSystem        g_signal_system;         // Objek Sinyal
 CEntryManager        g_entry_manager;
-CGridSlicerSystem    g_gridslicer; 
+CGridSlicerSystem    g_gridslicer;
+CHedgeSystem         g_hedge;                // [BARU] Objek Hedge
 CCloseManager        g_close_manager;
 
-// Variables
+// Interface
+CControlPanel        g_control_panel;
+
+// Global Variables
 datetime g_last_statistics_time = 0;
-datetime g_last_daily_reset = 0;
 
 //+------------------------------------------------------------------+
 //| INITIALIZATION (OnInit)                                          |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // --- A. Validate Inputs ---
+   // --- A. VALIDATE INPUTS ---
    string error_msg;
+   
+   // 1. Main Inputs
    if(!ValidateMainInputs(error_msg)) {
-      Alert("❌ Init Failed: ", error_msg);
+      Alert("❌ Main Init Failed: ", error_msg);
       return INIT_PARAMETERS_INCORRECT;
    }
+   
+   // 2. Martingale Inputs
+   if(!ValidateMartingaleInputs(error_msg)) {
+      Alert("❌ Martingale Init Failed: ", error_msg);
+      return INIT_PARAMETERS_INCORRECT;
+   }
+   
+   // 3. GridSlicer Inputs
    string gs_err;
    if(!ValidateGridSlicerInputs(gs_err)) {
-      Print("❌ GridSlicer Init Failed: " + gs_err);
+      Alert("❌ GridSlicer Init Failed: ", gs_err);
+      return INIT_PARAMETERS_INCORRECT;
+   }
+   
+   // 4. Hedge Inputs [BARU]
+   string hedge_err;
+   if(!ValidateHedgeInputs(hedge_err)) {
+      Alert("❌ Hedge Init Failed: ", hedge_err);
       return INIT_PARAMETERS_INCORRECT;
    }
 
-   // --- B. Init Core ---
-   if(!g_logger.Initialize(LOG_LEVEL_INFO, true, true, 5120)) return INIT_FAILED;
+   // --- B. INIT CORE COMPONENTS ---
+   if(!g_logger.Initialize(InpLogLevel, InpLogToFile, InpLogToConsole, InpMaxLogFileSizeKB)) return INIT_FAILED;
    if(!g_magic_manager.Initialize(InpBaseMagic)) return INIT_FAILED;
-   if(!g_error_handler.Initialize(InpMaxRetries, 100)) return INIT_FAILED;
+   if(!g_error_handler.Initialize(InpMaxRetries, InpRetryDelayMS)) return INIT_FAILED;
    
-   // --- C. Init State & Utilities ---
-   // Hedge & Recovery dimatikan (false) karena belum ada logicnya
-   if(!g_state_manager.Initialize(InpEnableMartingale, InpEnableGridSlicer, false, false, 
+   // --- C. INIT STATE & UTILITIES ---
+   // Note: Hedge enable flag passed to StateManager
+   if(!g_state_manager.Initialize(InpEnableMartingale, InpGS_Enable, InpHedge_Enable, InpEnableRecovery, 
                                   InpCooldownSeconds, &g_magic_manager, &g_trade)) return INIT_FAILED;
-
+                                  
    g_trade.SetExpertMagicNumber(InpBaseMagic);
    g_trade.SetDeviationInPoints(InpSlippage);
-   
-   // [FIX PENTING] Jangan paksa FOK! Biarkan Auto-Detect.
-   // g_trade.SetTypeFilling(ORDER_FILLING_FOK); 
+   g_trade.SetTypeFilling(ORDER_FILLING_FOK); // Atau ORDER_FILLING_IOC tergantung broker
    
    if(!g_position_scanner.Initialize(&g_magic_manager)) return INIT_FAILED;
-   if(!g_price_helper.Initialize(14)) return INIT_FAILED; // ATR Period default 14
+   if(!g_price_helper.Initialize(InpMart_ATR_Period)) return INIT_FAILED;
    
-   if(!g_lot_calculator.Initialize(InpLotMode, InpFixedLot, 0, 0, 0, 
-                                   0.01, InpMaxLot, PROGRESSION_MULTIPLY, 0, 0)) return INIT_FAILED;
+   if(!g_lot_calculator.Initialize(InpLotMode, InpFixedLot, InpRiskPercent, InpRiskPoints, InpBalancePercent, 
+                                   InpMinLot, InpMaxLot, InpMart_ProgressionMode, InpMart_LotMultiplier, 
+                                   InpMart_LotAddValue)) return INIT_FAILED;
 
-   // --- D. Init Signal System (Optional) ---
-   g_signal_system.Initialize(&g_logger); 
-
-   // --- E. Init Close Manager (Global Risk & Exit) ---
-   if(!g_close_manager.Initialize(&g_trade, &g_magic_manager, &g_state_manager, &g_logger, &g_position_scanner))
+   // --- D. INIT RISK CONTROL (CLOSE MANAGER) ---
+   if(!g_close_manager.Initialize(&g_trade, &g_magic_manager, &g_state_manager, &g_logger, &g_position_scanner, &g_lot_calculator))
       return INIT_FAILED;
-      
-   // Setup Strategy: Global Basket Trailing (USD)
-   g_close_manager.SetGlobalBasketStrategy(InpUseGlobalBasket, InpGlobalTrailStart_Mult, InpGlobalTrailStop_Mult, InpFixedLot);
-   // Setup Risk: Equity & Daily Limits
-   g_close_manager.SetEquityStop(InpUseEquityStop, InpEquityStopPercent);
+   // Set Daily Limits
+   g_close_manager.SetDailyLimits(InpMaxDailyProfit, InpMaxDailyLoss);
 
-   // --- F. Init Strategies ---
+   // --- E. INIT TRADING STRATEGIES ---
    
-   // 1. Martingale System
+   // 1. Martingale V2
    if(!g_martingale.Initialize(&g_magic_manager, &g_state_manager, &g_position_scanner, &g_logger, 
                                &g_error_handler, &g_price_helper, &g_lot_calculator)) return INIT_FAILED;
-                               
+   
+   // Push Settings to Martingale Object
    g_martingale.SetMaxLayers(InpMart_MaxLayers);
    g_martingale.SetGridDistance(InpMart_FixedGridPoints);
    g_martingale.SetLotMultiplier(InpMart_LotMultiplier);
    g_martingale.SetInitialLot(g_lot_calculator.CalculateInitialLot());
-   
-   // TP Strategy: Jika Global Basket ON, matikan TP siklus internal agar tidak konflik
-   if(InpUseGlobalBasket) {
-       g_martingale.SetCycleTP(false, 0); 
-   } else {
-       g_martingale.SetCycleTP(true, 10.0); // Default $10 jika global basket mati
-   }
-   
-   // Grid Progression
+   g_martingale.SetCycleTP(InpMart_UseCycleTP, InpMart_CycleTPDollar); // Internal TP as backup
    g_martingale.SetGridProgression(InpMart_GridProgressionMode, InpMart_GridMultiplierValue, InpMart_GridAddValue);
    
-   // Resume State (Sync jika EA restart)
+   // Sync State (Resume logic for V2)
    g_martingale.SyncState();
 
    // 2. Entry Manager
-   // Pass NULL untuk signal sementara ini, karena kita pakai ZigZag internal di EntryManager
    if(!g_entry_manager.Initialize(&g_trade, &g_magic_manager, &g_state_manager, &g_logger, &g_error_handler, 
-                                  &g_lot_calculator, &g_price_helper, &g_martingale, NULL, 
-                                  InpEntryMethod, InpPO_DistancePoints, InpPO_CancelOnOpposite, 0.01)) return INIT_FAILED;
+                                  &g_lot_calculator, &g_price_helper, &g_martingale, 
+                                  InpEntryMethod, InpPO_DistancePoints, InpPO_CancelOnOpposite, InpManualLotSize)) return INIT_FAILED;
 
-   // 3. GridSlicer (Recovery)
+   // 3. GridSlicer V2
    if(!g_gridslicer.Initialize(&g_trade, &g_magic_manager, &g_state_manager, &g_logger, &g_error_handler, 
                                &g_position_scanner, &g_lot_calculator, &g_price_helper)) return INIT_FAILED;
+                               
+   // 4. Hedge System [BARU]
+   if(!g_hedge.Initialize(&g_trade, &g_magic_manager, &g_state_manager, &g_logger, 
+                          &g_position_scanner, &g_price_helper)) return INIT_FAILED;
 
-   // --- G. Finalize ---
-   EventSetTimer(1);
-   g_logger.Info("✅ TITAN GRID EA v1.17 READY");
-   g_logger.Info(StringFormat("   Entry Method: %s", EnumToString(InpEntryMethod)));
-   
-   if(InpEntryMethod == ENTRY_METHOD_PENDING_ORDER) {
-       g_logger.Info(StringFormat("   ZigZag Filter: %s", InpPO_UseFilter ? "ON" : "OFF (Fixed Distance)"));
+   // --- F. INIT UI ---
+   // Panel V2 (Info + Buttons)
+   if(!g_control_panel.Initialize(&g_state_manager, &g_logger, &g_position_scanner))
+   {
+      g_logger.Warning("Control Panel Init Failed - Continuing without UI");
    }
+   else
+   {
+      // Set dependencies for buttons (Entry & Martingale)
+    //  g_control_panel.SetDependencies(&g_entry_manager, &g_martingale); blokir sementara
+      g_control_panel.Create();
+   }
+
+   // --- G. FINALIZE ---
+   EventSetTimer(1); // Timer for statistics & UI update
+   g_logger.Info("✅ TITAN GRID EA v2.0 FULLY INITIALIZED");
    
    return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
-//| DEINITIALIZATION                                                 |
+//| DEINITIALIZATION (OnDeinit)                                      |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   if(InpEnableGridSlicer) g_gridslicer.CancelAllOrders(); // Safety cleanup
+   
+   // Cleanup Objects
+   g_control_panel.Destroy();
+   
+   // Safety Cleanup for GridSlicer
+   if(InpGS_Enable) g_gridslicer.CancelAllOrders(); 
+   
    g_logger.Info("👋 Titan Grid EA Stopped.");
 }
 
@@ -181,52 +206,60 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // 1. Update Core Data
+   // 1. UPDATE CORE DATA
+   //    Ensure all data is fresh before making decisions
    g_state_manager.CheckDailyReset();
-   g_position_scanner.Scan(); // Wajib scan dulu agar data profit valid
+   g_position_scanner.Scan(); 
    
-   // 2. SAFETY & GLOBAL EXIT (Priority #1)
-   //    Mengecek Global Basket, Equity Stop
+   // Update UI (throttled internally inside class)
+   g_control_panel.Update();
+
+   // 2. EXIT STRATEGY & RISK CONTROL (Priority #1)
+   //    Handles Global Basket, Martingale Avg Trail, Equity Stop
    g_close_manager.OnTick();
-   
-   // Jika Close Manager menutup semua posisi (misal kena TP Global), 
-   // hentikan logic lain di tick ini dan pastikan state bersih.
-   if(PositionsTotal() == 0)
+
+   // Sync check: If positions closed by manager, ensure MartingaleV2 knows
+   if(g_position_scanner.GetTotalCount() == 0 && g_martingale.IsIndependentCycleActive())
    {
-       // Reset Martingale flag jika posisi habis tapi flag masih nyala
-       if(g_martingale.IsIndependentCycleActive()) {
-           g_martingale.SyncState(); 
-       }
-       // Jika cycle tidak aktif menurut State Manager, stop disini
-       if(!g_state_manager.IsCycleActive()) return; 
+      g_martingale.SyncState();
    }
 
-   // 3. Track Cycle Status (Untuk Cleanup Logic)
+   // 3. DETERMINE CYCLE STATUS
+   //    Cycle is active if StateManager says so OR MartingaleV2 has internal tracking
    static bool prev_cycle_active = false;
    bool current_cycle_active = g_state_manager.IsCycleActive() || g_martingale.IsIndependentCycleActive();
    
-   // 4. Strategy Execution
-   if(!current_cycle_active) {
-      // Tidak ada posisi -> Cari Entry Baru (ZigZag / Pending / Signal)
-      g_entry_manager.OnTick(); 
+   // 4. STRATEGY EXECUTION
+   if(!current_cycle_active) 
+   {
+      // --- PHASE 1: NO POSITIONS ---
+      // Search for new Entry
+      g_entry_manager.OnTick();
    }
-   else {
-      // Ada posisi -> Manage Martingale (Add Layer)
-      g_martingale.OnTick();    
+   else 
+   {
+      // --- PHASE 2: MANAGING CYCLE ---
       
-      // Manage GridSlicer (Recovery PO jika floating)
-      if(InpEnableGridSlicer) {
-         g_gridslicer.OnTick(); 
+      // A. Martingale Logic (Add Layers)
+      g_martingale.OnTick();
+      
+      // B. GridSlicer Logic (Recovery POs)
+      if(InpGS_Enable) {
+         g_gridslicer.OnTick();
+      }
+      
+      // C. Hedge Logic (Protection) [BARU]
+      if(InpHedge_Enable) {
+         g_hedge.OnTick();
       }
    }
    
    // 5. AUTO CLEANUP LOGIC
-   //    Jika siklus berubah dari Aktif -> Mati (kena TP/SL),
-   //    Hapus semua Pending Order sisa.
+   //    If cycle just ended (Profit/Loss), clean up pending orders
    if(prev_cycle_active && !current_cycle_active)
    {
-      g_logger.Info("🔄 Cycle Ended -> Cleanup Triggered.");
-      if(InpEnableGridSlicer) g_gridslicer.CancelAllOrders();
+      g_logger.Info("🔄 Cycle Ended -> Cleanup triggered.");
+      if(InpGS_Enable) g_gridslicer.CancelAllOrders();
       g_entry_manager.CancelAllPendingOrders(); 
    }
    
@@ -234,16 +267,29 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| TIMER LOOP                                                       |
+//| TIMER LOOP (OnTimer)                                             |
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-   // Print Stats periodic (Optional, bisa dimatikan via input jika ada)
-   static datetime last_print = 0;
-   if(TimeCurrent() - last_print >= 3600) { // Tiap 1 jam
-      g_logger.LogSeparator("HOURLY STATS");
-      g_position_scanner.PrintSummary();
-      last_print = TimeCurrent();
+   // 1. Update UI (Periodic refresh for timer labels etc)
+   g_control_panel.Update();
+
+   // 2. Periodic Statistics Logging
+   if(InpPrintStatistics && InpStatisticsIntervalMinutes > 0) {
+      if(TimeCurrent() - g_last_statistics_time >= InpStatisticsIntervalMinutes * 60) {
+         g_logger.LogSeparator("STATS");
+         g_position_scanner.PrintSummary();
+         g_last_statistics_time = TimeCurrent();
+      }
    }
+}
+
+//+------------------------------------------------------------------+
+//| CHART EVENT HANDLER (OnChartEvent)                               |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+   // Pass events to Control Panel (Button Clicks)
+   g_control_panel.OnChartEvent(id, lparam, dparam, sparam);
 }
 //+------------------------------------------------------------------+

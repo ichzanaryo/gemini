@@ -96,7 +96,34 @@ enum ENUM_MARTINGALE_MODE
    MODE_BUY  = 1,     // Active BUY cycle
    MODE_SELL = 2      // Active SELL cycle
 };
+// ... (Kode sebelumnya tetap sama)
 
+//+------------------------------------------------------------------+
+//| HEDGING ENUMERATIONS                                              |
+//+------------------------------------------------------------------+
+enum ENUM_HEDGE_TYPE
+{
+   HEDGE_TYPE_FULL = 0,       // Lock 100% Volume
+   HEDGE_TYPE_PARTIAL = 1,    // Lock % Volume (e.g. 50%)
+   HEDGE_TYPE_FIXED_LOT = 2   // Lock Fixed Lot
+};
+
+enum ENUM_HEDGE_STRATEGY
+{
+   HEDGE_STRAT_LOCK = 0,         // Hold until manual/basket exit
+   HEDGE_STRAT_INDIVIDUAL_TP = 1,// Close Hedge only on TP
+   HEDGE_STRAT_GLOBAL_BASKET = 2 // Close All (Mart + Hedge) on Profit
+};
+
+enum ENUM_HEDGE_STATE
+{
+   HEDGE_STATE_INACTIVE = 0,
+   HEDGE_STATE_MONITORING = 1,   // Trigger reached, validating
+   HEDGE_STATE_CONFIRMING = 2,   // Timer/Candle check
+   HEDGE_STATE_ACTIVE = 3        // Position Open
+};
+
+// ... (Sisanya tetap sama)
 //+------------------------------------------------------------------+
 //| SIGNAL TYPE ENUMERATION                                           |
 //+------------------------------------------------------------------+
