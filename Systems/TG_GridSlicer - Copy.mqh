@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                          Systems/TG_GridSlicer.mqh |
 //|                                              Titan Grid EA v1.0      |
-//|               GridSlicer v1.06: Smart Gap & Distance Fix             |
+//|        GridSlicer ULTIMATE: v2 Features + Anti-Stacking Fix          |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, ichzanaryo"
 #property link      "https://t.me/fatichid"
-#property version   "1.06"
+#property version   "2.01"
 
 #ifndef TG_GRIDSLICER_MQH
 #define TG_GRIDSLICER_MQH
@@ -21,6 +21,15 @@
 #include "../Utilities/TG_PriceHelpers.mqh"
 #include "../Config/TG_Inputs_GridSlicer.mqh"
 
+// Struct untuk Learning Data
+struct SGSLearningData
+{
+   double distance_percent; 
+   int    success_count;    
+   int    total_count;      
+   double success_rate;     
+};
+
 class CGridSlicerSystem
 {
 private:
@@ -33,22 +42,26 @@ private:
    CLotCalculator* m_lot_calculator;
    CPriceHelper* m_price_helper;
    
-   // Struktur Harga Layer (Index 1 = Awal, Index N = Terakhir/Floating)
+   // Tracking Harga Layer
    double m_martingale_layers[30]; 
    int    m_total_martingale_layers;
+   
+   // Learning System
+   SGSLearningData m_learning_data[];
+   
+   // ATR Handle
+   int m_atr_handle;
    
    // Throttle
    datetime m_last_check_time;
 
    //+------------------------------------------------------------------+
-   //| Deteksi Arah Martingale Utama                                    |
+   //| Deteksi Arah Martingale                                          |
    //+------------------------------------------------------------------+
    ENUM_POSITION_TYPE GetMainDirection()
    {
       if(m_state_manager != NULL && m_state_manager.IsCycleActive())
-      {
          return (m_state_manager.GetCurrentMode() == MODE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
-      }
       
       int buy=0, sell=0;
       for(int i=PositionsTotal()-1; i>=0; i--) {
@@ -63,7 +76,7 @@ private:
    }
 
    //+------------------------------------------------------------------+
-   //| Update Struktur Layer (Sorting Harga)                            |
+   //| Update Struktur Layer                                            |
    //+------------------------------------------------------------------+
    void UpdateLayerStructure(ENUM_POSITION_TYPE direction)
    {
@@ -92,63 +105,80 @@ private:
       int total = ArraySize(prices);
       m_total_martingale_layers = total;
       
-      // Mapping ke Index 1-based
       if(direction == POSITION_TYPE_BUY) {
-         // BUY: Index 1 = Tertinggi (L1), Index N = Terendah (Last)
          for(int i=0; i<total; i++) m_martingale_layers[i+1] = prices[total-1-i]; 
-      } 
-      else {
-         // SELL: Index 1 = Terendah (L1), Index N = Tertinggi (Last)
+      } else {
          for(int i=0; i<total; i++) m_martingale_layers[i+1] = prices[i];
       }
    }
 
    //+------------------------------------------------------------------+
-   //| Cek Apakah Slot PO Ini Sudah Terisi?                             |
+   //| ANTI-STACKING: Cek Spesifik PO (Unique Magic per Index)          |
    //+------------------------------------------------------------------+
    bool IsSpecificPOFilled(int layer_index, int po_index)
    {
-      // ID Unik: (Layer * 100) + Index. Contoh: L3 PO1 = 301
+      // ID Unik: (Layer * 100) + Index
       int unique_id = (layer_index * 100) + po_index;
       long target_magic = m_magic.GetGridSlicerMagic(unique_id);
       
-      // 1. Cek Pending Order Aktif
+      // Cek Pending Orders
       for(int i=OrdersTotal()-1; i>=0; i--) {
          ulong ticket = OrderGetTicket(i);
          if(OrderSelect(ticket)) {
             if(OrderGetInteger(ORDER_MAGIC) == target_magic) return true;
          }
       }
-      
-      // 2. Cek Posisi Aktif (Order sudah kena)
+      // Cek Active Positions
       for(int i=PositionsTotal()-1; i>=0; i--) {
          ulong ticket = PositionGetTicket(i);
          if(PositionSelectByTicket(ticket)) {
             if(PositionGetInteger(POSITION_MAGIC) == target_magic) return true;
          }
       }
-      
       return false;
    }
 
    //+------------------------------------------------------------------+
-   //| Hitung Lot                                                       |
+   //| V2 FEATURE: Adaptive Distance Calculation (ATR)                  |
+   //+------------------------------------------------------------------+
+   double CalculateAdaptivePercent()
+   {
+      if(!InpGS_UseAdaptivePercentage) return InpGS_BaseDistancePercent;
+      
+      double atr_buffer[];
+      ArraySetAsSeries(atr_buffer, true);
+      if(CopyBuffer(m_atr_handle, 0, 0, 1, atr_buffer) < 1) return InpGS_BaseDistancePercent;
+      
+      double current_atr = atr_buffer[0] / _Point;
+      double normal_atr = 100.0; // Baseline ATR (bisa dijadikan input jika mau)
+      
+      double ratio = current_atr / normal_atr;
+      double adapted = InpGS_BaseDistancePercent * ratio * InpGS_VolatilityMultiplier;
+      
+      if(adapted < InpGS_MinPercent) adapted = InpGS_MinPercent;
+      if(adapted > InpGS_MaxPercent) adapted = InpGS_MaxPercent;
+      
+      return adapted;
+   }
+
+   //+------------------------------------------------------------------+
+   //| Hitung Lot Slicer                                                |
    //+------------------------------------------------------------------+
    double CalculateSlicerLot(double base_lot, int layer_index)
    {
       double multiplier = 1.0 + ((layer_index - InpGS_StartLayer) * 0.1); 
-      double total_layer_lot = base_lot * multiplier;
-      double lot_per_po = total_layer_lot; 
+      double lot = base_lot * multiplier;
       
+      // Normalize
       double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
       double min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
       double max = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
       
-      if(step > 0) lot_per_po = MathRound(lot_per_po / step) * step;
-      if(lot_per_po < min) lot_per_po = min;
-      if(lot_per_po > max) lot_per_po = max;
+      if(step > 0) lot = MathRound(lot / step) * step;
+      if(lot < min) lot = min;
+      if(lot > max) lot = max;
       
-      return lot_per_po;
+      return lot;
    }
 
 public:
@@ -156,6 +186,11 @@ public:
       m_trade = NULL; m_magic = NULL;
       ArrayInitialize(m_martingale_layers, 0.0);
       m_last_check_time = 0;
+      m_atr_handle = INVALID_HANDLE;
+   }
+   
+   ~CGridSlicerSystem() {
+      if(m_atr_handle != INVALID_HANDLE) IndicatorRelease(m_atr_handle);
    }
    
    bool Initialize(CTrade* trade, CMagicNumberManager* magic, CStateManager* state_mgr, 
@@ -165,34 +200,34 @@ public:
       m_trade = trade; m_magic = magic; m_state_manager = state_mgr;
       m_logger = logger; m_error_handler = error_handler;
       m_scanner = scanner; m_lot_calculator = lot_calc; m_price_helper = price_helper;
+      
+      // Init ATR untuk fitur Adaptive
+      m_atr_handle = iATR(_Symbol, PERIOD_CURRENT, 14);
+      
       return true;
    }
    
    //+------------------------------------------------------------------+
-   //| Logic Utama (OnTick)                                             |
+   //| Main Logic (OnTick)                                              |
    //+------------------------------------------------------------------+
    void OnTick()
    {
       if(!InpGS_Enable) return;
-      if(TimeCurrent() - m_last_check_time < 1) return; // Throttle 1s
+      if(TimeCurrent() - m_last_check_time < 1) return; 
       m_last_check_time = TimeCurrent();
       
-      // Update Data Layer
+      int total_pos = PositionsTotal();
+      if(total_pos < InpGS_StartLayer) return;
+      
       ENUM_POSITION_TYPE main_dir = GetMainDirection();
       UpdateLayerStructure(main_dir);
       
-      // Jika layer belum cukup dalam, skip
       if(m_total_martingale_layers < InpGS_StartLayer) return;
       
-      // Ambil data market
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double stop_lvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-      // Tambahkan buffer aman agar order tidak ditolak (spread + 20 point)
-      double safe_dist = stop_lvl + (20 * _Point); 
-
-      // --- LOOP DARI LAYER TERDALAM KE ATAS ---
-      // i = Layer Bawah (Deep), i-1 = Layer Atas (Target)
+      // Hitung Jarak Adaptif (Fitur V2)
+      double current_percent = CalculateAdaptivePercent();
+      
+      // --- LOOP GAP ---
       for(int i = m_total_martingale_layers; i >= InpGS_StartLayer; i--)
       {
          double deep_price = m_martingale_layers[i];     
@@ -200,88 +235,88 @@ public:
          
          if(deep_price <= 0 || target_price <= 0) continue;
          
-         // Hitung Gap
+         // Validasi Gap
          double full_gap = MathAbs(deep_price - target_price);
-         
-         // Tentukan jumlah PO (jika gap sempit, cuma 1)
          int po_count = InpGS_MaxPOPerGap;
          if(full_gap < InpGS_MinGapForMultiPO) po_count = 1;
          
-         // Area Efektif untuk di-slice (misal 30% dari gap)
-         double effective_gap = full_gap * (InpGS_BaseDistancePercent / 100.0);
+         double effective_gap = full_gap * (current_percent / 100.0);
          double slice_step = effective_gap / po_count;
          
-         // Loop PO dalam gap
+         // --- LOOP PO ---
          for(int k = 1; k <= po_count; k++)
          {
-            // Cek apakah slot ini sudah terisi?
+            // Validasi Magic Number (Fitur Anti-Stacking)
             if(IsSpecificPOFilled(i, k)) continue;
             
-            // Hitung Harga Entry
+            // Kalkulasi Harga
             double entry_dist = slice_step * k; 
             double entry_price = 0;
             
             if(main_dir == POSITION_TYPE_BUY) {
-               // BUY STOP: Di atas Deep Price
                entry_price = deep_price + entry_dist;
-               
-               // [FIX] Validasi Jarak Aman:
-               // Jika entry_price terlalu dekat dengan Ask, geser ke atas minimal safe_dist
-               if(entry_price <= ask + safe_dist) {
-                  entry_price = ask + safe_dist;
-                  // Tapi jangan sampai melebihi target price (layer atasnya)
-                  if(entry_price >= target_price) continue; // Gap sudah tertutup, skip
-               }
-            } 
-            else {
-               // SELL STOP: Di bawah Deep Price
+            } else {
                entry_price = deep_price - entry_dist;
-               
-               // [FIX] Validasi Jarak Aman:
-               // Jika entry_price terlalu dekat dengan Bid, geser ke bawah minimal safe_dist
-               if(entry_price >= bid - safe_dist) {
-                  entry_price = bid - safe_dist;
-                  if(entry_price <= target_price) continue; // Gap tertutup
-               }
             }
             
             entry_price = NormalizeDouble(entry_price, _Digits);
             
-            // Hitung Lot
-            double lot = CalculateSlicerLot(0.01, i); 
+            // Validasi Broker Distance
+            double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double safe_dist = ((double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point) + (20*_Point);
             
-            // Set Magic Unik
+            bool price_valid = false;
+            if(main_dir == POSITION_TYPE_BUY) {
+               // Buy Stop: Price > Ask
+               if(entry_price <= ask + safe_dist) {
+                   entry_price = ask + safe_dist; // Auto adjust
+                   if(entry_price >= target_price) continue; // Gap tertutup
+               }
+               price_valid = true;
+            } else {
+               // Sell Stop: Price < Bid
+               if(entry_price >= bid - safe_dist) {
+                   entry_price = bid - safe_dist; // Auto adjust
+                   if(entry_price <= target_price) continue; // Gap tertutup
+               }
+               price_valid = true;
+            }
+            
+            if(!price_valid) continue;
+            
+            // Eksekusi
+            double lot = CalculateSlicerLot(0.01, i);
             int unique_id = (i * 100) + k;
-            long magic = m_magic.GetGridSlicerMagic(unique_id);
+            long magic = m_magic.GetGridSlicerMagic(unique_id); // Gunakan Magic Unik!
             m_trade.SetExpertMagicNumber(magic);
             
             string comment = StringFormat("GS-L%d-P%d", i, k);
             bool res = false;
             
-            // Eksekusi Order
-            if(main_dir == POSITION_TYPE_BUY) {
+            if(main_dir == POSITION_TYPE_BUY)
                res = m_trade.BuyStop(lot, entry_price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, comment);
-            } else {
+            else
                res = m_trade.SellStop(lot, entry_price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, comment);
-            }
-            
-            // Logging
-            if(res && m_logger != NULL) {
-               m_logger.Info(StringFormat("✅ GS PO Placed: Gap L%d (#%d) @ %.5f", i, k, entry_price));
-            } else if(!res && m_logger != NULL) {
-               // Log error jika gagal, untuk debugging user
-               m_logger.Debug(StringFormat("⚠️ GS PO Fail L%d: Err %d", i, GetLastError()));
-            }
+               
+            if(res && m_logger != NULL)
+               m_logger.Info(StringFormat("✅ GS PO Placed (Adaptive %.1f%%): L%d #%d @ %.5f", current_percent, i, k, entry_price));
          }
       }
    }
    
+   //+------------------------------------------------------------------+
+   //| Cleanup                                                          |
+   //+------------------------------------------------------------------+
    void CancelAllOrders()
    {
       for(int i=OrdersTotal()-1; i>=0; i--) {
          ulong ticket = OrderGetTicket(i);
          if(OrderSelect(ticket)) {
             long magic = OrderGetInteger(ORDER_MAGIC);
+            // Cek apakah Magic Number masuk range GridSlicer
+            // Base Range: 200000 - 209999 (asumsi base magic standar)
+            // Gunakan helper dari Magic Manager
             if(m_magic.IsGridSlicer(magic)) { 
                 m_trade.OrderDelete(ticket);
             }

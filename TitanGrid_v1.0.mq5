@@ -130,8 +130,9 @@ int OnInit()
                                    InpMart_LotAddValue)) return INIT_FAILED;
 
    // --- D. INIT RISK CONTROL (CLOSE MANAGER) ---
-   if(!g_close_manager.Initialize(&g_trade, &g_magic_manager, &g_state_manager, &g_logger, &g_position_scanner, &g_lot_calculator))
-      return INIT_FAILED;
+if(! g_close_manager.Initialize(&g_trade, &g_magic_manager, &g_state_manager, 
+                                &g_logger, &g_position_scanner))  // ← 5 param
+   return INIT_FAILED;
    // Set Daily Limits
    g_close_manager.SetDailyLimits(InpMaxDailyProfit, InpMaxDailyLoss);
 
