@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                          Systems/TG_GridSlicer.mqh |
 //|                                              Titan Grid EA v2.08    |
-//|        FIXED:  Proper Gap Spacing & Distance Calculation           |
+//|        FIXED: Correct Gap Direction Calculation                    |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, ichzanaryo"
 #property link      "https://t.me/fatichid"
@@ -69,7 +69,7 @@ private:
    }
 
    //+------------------------------------------------------------------+
-   //| Update Struktur Layer - FIXED VERSION                            |
+   //| Update Struktur Layer - ULTRA DEBUG VERSION                      |
    //+------------------------------------------------------------------+
    void UpdateLayerStructure(ENUM_POSITION_TYPE direction)
    {
@@ -85,7 +85,7 @@ private:
       double prices[];
       ArrayResize(prices, 0);
       
-      // Collect prices from Martingale positions only
+      // Collect prices
       for(int i=PositionsTotal()-1; i>=0; i--) {
          if(PositionSelectByTicket(PositionGetTicket(i))) {
             long magic = PositionGetInteger(POSITION_MAGIC);
@@ -97,7 +97,7 @@ private:
                   prices[s] = price;
                   
                   if(m_logger != NULL && m_debug_mode) {
-                     m_logger.Info(StringFormat("  Found Mart Pos: %. 5f (Magic: %d)", price, magic));
+                     m_logger. Info(StringFormat("  Found Mart Pos: %. 5f (Magic: %d)", price, magic));
                   }
                }
             }
@@ -111,7 +111,6 @@ private:
          return;
       }
       
-      // Sort:  ascending for both BUY and SELL
       ArraySort(prices);
       
       int total = ArraySize(prices);
@@ -125,14 +124,14 @@ private:
          }
       }
       
-      // Assign to layers (1-indexed)
-      // BUY:  L1 = lowest, L2 = higher, etc.
-      // SELL: L1 = highest, L2 = lower, etc.
+      // ✅ PERBAIKAN: Assign berdasarkan logika natural price
       if(direction == POSITION_TYPE_BUY) {
+         // BUY: Layer 1 = terendah (awal martingale), Layer N = tertinggi (paling dalam)
          for(int i=0; i<total; i++) {
             m_martingale_layers[i+1] = prices[i];
          }
       } else {
+         // SELL: Layer 1 = tertinggi (awal martingale), Layer N = terendah (paling dalam)
          for(int i=0; i<total; i++) {
             m_martingale_layers[i+1] = prices[total-1-i];
          }
@@ -148,27 +147,30 @@ private:
    }
 
    //+------------------------------------------------------------------+
-   //| Check if PO exists near price (tolerance-based)                  |
+   //| ANTI-STACKING:  Cek Spesifik PO (Unique Magic per Index)          |
    //+------------------------------------------------------------------+
-   bool IsPOExistsNear(double price, double tolerance_points)
+   bool IsSpecificPOFilled(int layer_index, int po_index)
    {
+      int unique_id = (layer_index * 100) + po_index;
+      long target_magic = m_magic.GetGridSlicerMagic(unique_id);
+      
       for(int i=OrdersTotal()-1; i>=0; i--) {
          ulong ticket = OrderGetTicket(i);
          if(OrderSelect(ticket)) {
-            long magic = OrderGetInteger(ORDER_MAGIC);
-            if(m_magic.IsGridSlicer(magic)) {
-               double po_price = OrderGetDouble(ORDER_PRICE_OPEN);
-               if(MathAbs(po_price - price) < tolerance_points * _Point) {
-                  return true;
-               }
-            }
+            if(OrderGetInteger(ORDER_MAGIC) == target_magic) return true;
+         }
+      }
+      for(int i=PositionsTotal()-1; i>=0; i--) {
+         ulong ticket = PositionGetTicket(i);
+         if(PositionSelectByTicket(ticket)) {
+            if(PositionGetInteger(POSITION_MAGIC) == target_magic) return true;
          }
       }
       return false;
    }
 
    //+------------------------------------------------------------------+
-   //| V2 FEATURE:  Adaptive Distance Calculation (ATR)                  |
+   //| V2 FEATURE: Adaptive Distance Calculation (ATR)                  |
    //+------------------------------------------------------------------+
    double CalculateAdaptivePercent()
    {
@@ -191,7 +193,7 @@ private:
    }
 
    //+------------------------------------------------------------------+
-   //| Calculate Slicer Lot                                             |
+   //| Hitung Lot Slicer                                                |
    //+------------------------------------------------------------------+
    double CalculateSlicerLot(double base_lot, int layer_index)
    {
@@ -236,18 +238,18 @@ public:
       m_atr_handle = iATR(_Symbol, PERIOD_CURRENT, 14);
       
       if(m_logger != NULL) {
-         m_logger.Info("GridSlicer System Initialized (v2.08 - Fixed Spacing)");
+         m_logger.Info("GridSlicer System Initialized (v2.08 - Fixed Gap Direction)");
       }
       
       return true;
    }
    
    //+------------------------------------------------------------------+
-   //| Main Logic (OnTick) - FIXED SPACING                              |
+   //| Main Logic (OnTick) - ULTRA DEBUG                                |
    //+------------------------------------------------------------------+
    void OnTick()
    {
-      if(!InpGS_Enable) return;
+      if(! InpGS_Enable) return;
       if(TimeCurrent() - m_last_check_time < 1) return; 
       m_last_check_time = TimeCurrent();
       
@@ -259,7 +261,6 @@ public:
       
       if(m_total_martingale_layers < InpGS_StartLayer) return;
       
-      // Calculate percentage of GAP to use (not total distance)
       double current_percent = CalculateAdaptivePercent();
       
       double current_price = (main_dir == POSITION_TYPE_BUY) ? 
@@ -269,8 +270,8 @@ public:
       if(m_logger != NULL) {
          m_logger.Info("==========================================");
          m_logger. Info("GRIDSLICER ONTICK");
-         m_logger.Info(StringFormat("Current Price: %.5f", current_price));
-         m_logger.Info(StringFormat("Gap Percentage: %.1f%%", current_percent));
+         m_logger. Info(StringFormat("Current Price:  %.5f", current_price));
+         m_logger.Info(StringFormat("Percentage: %.1f%%", current_percent));
          m_logger.Info(StringFormat("Total Layers: %d", m_total_martingale_layers));
          m_logger.Info(StringFormat("Start Layer: %d", InpGS_StartLayer));
          m_logger.Info("==========================================");
@@ -278,61 +279,89 @@ public:
       
       int total_po_placed = 0;
       
-      // Loop through gaps between layers
+      // --- LOOP GAP ---
       for(int i = m_total_martingale_layers; i >= InpGS_StartLayer; i--)
       {
+         if(m_logger != NULL) {
+            m_logger.Info("");
+            m_logger.Info(StringFormat("########## LOOP ITERATION i=%d ##########", i));
+         }
+         
          double target_price = m_martingale_layers[i-1];
          double deeper_price = m_martingale_layers[i];
          
-         if(deeper_price <= 0 || target_price <= 0) continue;
+         if(m_logger != NULL) {
+            m_logger.Info(StringFormat("Array Access: m_martingale_layers[%d] = %.5f (target)", i-1, target_price));
+            m_logger.Info(StringFormat("Array Access: m_martingale_layers[%d] = %.5f (deeper)", i, deeper_price));
+         }
          
-         // Calculate actual gap size in points
+         if(deeper_price <= 0 || target_price <= 0) {
+            if(m_logger != NULL) {
+               m_logger.Warning(StringFormat("SKIP: Invalid prices (target=%.5f, deeper=%.5f)", target_price, deeper_price));
+            }
+            continue;
+         }
+         
          double full_gap = MathAbs(deeper_price - target_price);
          
-         // Calculate how many POs fit in this gap with the percentage
+         if(m_logger != NULL) {
+            m_logger.Info(StringFormat("Gap Calculation: |%. 5f - %.5f| = %.5f", deeper_price, target_price, full_gap));
+         }
+         
          int max_po_count = (int)MathFloor(100.0 / current_percent);
+         
          if(max_po_count > InpGS_MaxPOPerGap) max_po_count = InpGS_MaxPOPerGap;
          if(max_po_count < 1) max_po_count = 1;
          
-         // Calculate spacing between POs
-         double spacing_distance = (full_gap / (double)max_po_count);
+         double spacing_distance = full_gap * (current_percent / 100.0);
          
          if(m_logger != NULL) {
-            m_logger.Info(StringFormat("--- GAP L%d -> L%d ---", i-1, i));
+            m_logger. Info(StringFormat("--- GAP L%d -> L%d ---", i-1, i));
             m_logger.Info(StringFormat("Target Layer (L%d): %.5f", i-1, target_price));
             m_logger.Info(StringFormat("Deeper Layer (L%d): %.5f", i, deeper_price));
             m_logger.Info(StringFormat("Gap Size: %.5f points", full_gap));
-            m_logger. Info(StringFormat("Max PO Count: %d", max_po_count));
-            m_logger. Info(StringFormat("Spacing per PO: %.5f points", spacing_distance));
+            m_logger.Info(StringFormat("Spacing per PO: %.5f points", spacing_distance));
+            m_logger.Info(StringFormat("Max PO Count: %d", max_po_count));
          }
          
          int po_placed_in_gap = 0;
          
-         // Place POs in this gap
+         // ✅ PERBAIKAN UTAMA: Perhitungan Entry Price
          for(int k = 1; k <= max_po_count; k++)
          {
-            double entry_price = 0;
-            
-            // Calculate entry price based on direction
-            if(main_dir == POSITION_TYPE_BUY) {
-               // For BUY: place above target (toward deeper)
-               entry_price = target_price + (spacing_distance * k);
-            } else {
-               // For SELL: place below target (toward deeper)
-               entry_price = target_price - (spacing_distance * k);
-            }
-            
-            entry_price = NormalizeDouble(entry_price, _Digits);
-            
-            // Check if already exists nearby (5 points tolerance)
-            if(IsPOExistsNear(entry_price, 5.0)) {
+            if(IsSpecificPOFilled(i, k)) {
                if(m_logger != NULL && k <= 2) {
-                  m_logger.Info(StringFormat("  PO #%d:  %. 5f already exists nearby (skipped)", k, entry_price));
+                  m_logger.Info(StringFormat("  PO #%d: Already exists (skipped)", k));
                }
                continue;
             }
             
-            // Verify still in gap
+            double entry_dist = spacing_distance * k;
+            double entry_price = 0;
+            
+            // ✅ LOGIKA BARU: Selalu tambah ke target (gap selalu naik dari target ke deeper)
+            if(main_dir == POSITION_TYPE_BUY) {
+               // BUY: Gap naik (target < deeper), PO di atas target
+               entry_price = target_price + entry_dist;
+               
+               if(m_logger != NULL && k <= 3) {
+                  m_logger.Info(StringFormat("  PO #%d: %. 5f = %.5f + (%.5f * %d)", 
+                                            k, entry_price, target_price, spacing_distance, k));
+               }
+            } else {
+               // SELL: Gap turun (target > deeper), tapi sorting bikin target = tertinggi
+               // Jadi tetap tambah spacing dari target (menuju deeper yang lebih rendah)
+               entry_price = target_price - entry_dist;
+               
+               if(m_logger != NULL && k <= 3) {
+                  m_logger.Info(StringFormat("  PO #%d: %.5f = %.5f - (%.5f * %d)", 
+                                            k, entry_price, target_price, spacing_distance, k));
+               }
+            }
+            
+            entry_price = NormalizeDouble(entry_price, _Digits);
+            
+            // ✅ Validasi Gap
             bool in_gap = false;
             if(main_dir == POSITION_TYPE_BUY) {
                in_gap = (entry_price > target_price && entry_price < deeper_price);
@@ -341,13 +370,14 @@ public:
             }
             
             if(! in_gap) {
-               if(m_logger != NULL && k == 1) {
-                  m_logger.Info(StringFormat("  PO #%d: %. 5f OUTSIDE gap - STOP", k, entry_price));
+               if(m_logger != NULL && k <= 2) {
+                  m_logger.Info(StringFormat("  PO #%d: %. 5f OUTSIDE gap [%.5f - %.5f] - STOP", 
+                                            k, entry_price, target_price, deeper_price));
                }
                break;
             }
             
-            // Check price vs current (PO must be ahead of market)
+            // ✅ Validasi arah harga (PO harus di luar harga saat ini)
             bool price_direction_ok = false;
             if(main_dir == POSITION_TYPE_BUY) {
                price_direction_ok = (entry_price > current_price);
@@ -357,13 +387,13 @@ public:
             
             if(!price_direction_ok) {
                if(m_logger != NULL && k == 1) {
-                  m_logger.Info(StringFormat("  PO #%d: %.5f behind current %. 5f - SKIP GAP", 
+                  m_logger.Info(StringFormat("  PO #%d: %. 5f wrong side of current %. 5f - SKIP GAP", 
                                             k, entry_price, current_price));
                }
                break;
             }
             
-            // Apply stops level safety
+            // ✅ Validasi Broker STOPS_LEVEL
             double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
             double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
             double stops_level = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
@@ -377,7 +407,7 @@ public:
                if(entry_price > max_price) entry_price = max_price;
             }
             
-            // Re-verify after adjustment
+            // Recheck setelah adjustment
             if(main_dir == POSITION_TYPE_BUY) {
                in_gap = (entry_price > target_price && entry_price < deeper_price);
             } else {
@@ -386,7 +416,7 @@ public:
             
             if(!in_gap) continue;
             
-            // Place order
+            // ✅ Place Order
             double lot = CalculateSlicerLot(InpGS_L1LotMultiplier * 0.01, i);
             int unique_id = (i * 100) + k;
             long magic = m_magic.GetGridSlicerMagic(unique_id);
@@ -396,7 +426,7 @@ public:
             bool res = false;
             
             if(main_dir == POSITION_TYPE_BUY)
-               res = m_trade.BuyStop(lot, entry_price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, comment);
+               res = m_trade. BuyStop(lot, entry_price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, comment);
             else
                res = m_trade.SellStop(lot, entry_price, _Symbol, 0, 0, ORDER_TIME_GTC, 0, comment);
                
@@ -416,13 +446,13 @@ public:
          }
          
          if(m_logger != NULL) {
-            m_logger.Info(StringFormat("Gap L%d->L%d Summary:  %d PO(s) placed", i-1, i, po_placed_in_gap));
+            m_logger.Info(StringFormat("Gap L%d->L%d Summary: %d PO(s) placed", i-1, i, po_placed_in_gap));
          }
       }
       
       if(m_logger != NULL) {
-         m_logger. Info("==========================================");
-         m_logger.Info(StringFormat("TOTAL: %d GridSlicer PO(s) placed", total_po_placed));
+         m_logger.Info("==========================================");
+         m_logger.Info(StringFormat("TOTAL:  %d GridSlicer PO(s) placed", total_po_placed));
          m_logger.Info("==========================================");
       }
    }
@@ -444,7 +474,7 @@ public:
       }
       
       if(m_logger != NULL && cancelled > 0) {
-         m_logger.Info(StringFormat("GridSlicer:  %d pending order(s) cancelled", cancelled));
+         m_logger.Info(StringFormat("GridSlicer: %d pending order(s) cancelled", cancelled));
       }
    }
 };
